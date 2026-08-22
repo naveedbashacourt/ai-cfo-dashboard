@@ -1,6 +1,7 @@
 import sqlite3
 import hashlib
 import datetime
+import io
 import requests
 import pandas as pd
 import plotly.express as px
@@ -8,8 +9,15 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 import google.generativeai as genai
+import qrcode
+from PIL import Image
 
-st.set_page_config(page_title="AI CFO Enterprise — Autonomous Wealth Platform", layout="wide", page_icon="🏛️")
+# ----------------- BRANDING & PAGE CONFIG -----------------
+st.set_page_config(
+    page_title="VaultCFO — Autonomous Wealth Copilot",
+    layout="wide",
+    page_icon="🛡️"
+)
 
 # ----------------- DATABASE SCHEMA -----------------
 conn = sqlite3.connect("cfo_enterprise_v2.db", check_same_thread=False)
@@ -97,6 +105,15 @@ def fetch_live_market_price(ticker):
         pass
     return 0.0
 
+def generate_qr_image(url: str):
+    qr = qrcode.QRCode(version=1, box_size=8, border=2)
+    qr.add_data(url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="#0F172A", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
 # ----------------- AUTHENTICATION -----------------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -104,8 +121,17 @@ if "authenticated" not in st.session_state:
     st.session_state.username = ""
 
 if not st.session_state.authenticated:
-    st.title("🔒 Institutional AI CFO — Sign In")
-    tab_log, tab_reg = st.tabs(["Login", "Create Account"])
+    st.markdown("""
+        <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 25px;">
+            <div style="background-color: #1E293B; padding: 14px 18px; border-radius: 14px; font-size: 32px;">🛡️</div>
+            <div>
+                <h1 style="margin: 0; font-size: 30px; font-weight: 700;">VaultCFO <span style="color: #38BDF8; font-size: 18px; font-weight: 600;">PRO</span></h1>
+                <p style="margin: 0; color: #94A3B8; font-size: 15px;">Autonomous Multi-Asset Intelligence & Wealth Copilot</p>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    tab_log, tab_reg = st.tabs(["Login", "Create Private Account"])
     with tab_log:
         u = st.text_input("Username", key="l_u")
         p = st.text_input("Password", type="password", key="l_p")
@@ -132,9 +158,20 @@ if not st.session_state.authenticated:
                     st.error("Username already exists.")
     st.stop()
 
-# ----------------- LOGGED IN APP -----------------
+# ----------------- LOGGED IN APPLICATION -----------------
 uid = st.session_state.user_id
 current_year = datetime.datetime.now().year
+
+# Header with Logo & Brand
+st.markdown("""
+    <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 20px;">
+        <div style="background-color: #1E293B; padding: 12px 18px; border-radius: 12px; font-size: 28px;">🛡️</div>
+        <div>
+            <h1 style="margin: 0; font-size: 28px; font-weight: 700;">VaultCFO <span style="color: #38BDF8; font-size: 18px; font-weight: 500;">ENTERPRISE</span></h1>
+            <p style="margin: 0; color: #94A3B8; font-size: 14px;">Autonomous Multi-Asset Intelligence & Wealth Copilot</p>
+        </div>
+    </div>
+""", unsafe_allow_html=True)
 
 with st.sidebar:
     st.title(f"👤 {st.session_state.username}")
@@ -144,11 +181,14 @@ with st.sidebar:
         st.rerun()
     st.divider()
     if ai_ready:
-        st.success("⚡ Gemini AI Active (via Cloud Secrets)")
+        st.success("⚡ Gemini AI Active")
     else:
-        st.warning("⚠️ No GEMINI_API_KEY detected in Streamlit Secrets.")
+        st.warning("⚠️ Add GEMINI_API_KEY in Secrets")
+    st.caption("Live Rates:")
+    st.caption(f"• USD/INR: ₹{USD_TO_INR}")
+    st.caption(f"• AED/INR: ₹{AED_TO_INR}")
 
-# Fetch Data
+# Fetch User Data
 assets_raw = pd.read_sql(f"SELECT * FROM assets WHERE user_id = {uid}", conn)
 liabs_raw = pd.read_sql(f"SELECT * FROM liabilities WHERE user_id = {uid}", conn)
 
@@ -212,9 +252,7 @@ net_worth = total_current_inr - total_liabilities
 unrealized_pnl = total_current_inr - total_invested_inr
 unrealized_pnl_pct = (unrealized_pnl / total_invested_inr * 100) if total_invested_inr > 0 else 0.0
 
-# ----------------- TOP METRICS -----------------
-st.title("💼 AI CFO Enterprise Hub")
-
+# Top KPI Row
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("True Net Worth", f"₹{net_worth:,.2f}", delta=f"{unrealized_pnl_pct:.2f}% Return")
 c2.metric("Total Assets", f"₹{total_current_inr:,.2f}", f"₹{total_invested_inr:,.2f} Invested")
@@ -223,21 +261,23 @@ c4.metric("Annual Rental Income", f"₹{annual_rental_cashflow:,.2f}")
 
 st.divider()
 
-tab_ai, tab_port, tab_add, tab_debt, tab_sim = st.tabs([
+# Navigation Tabs
+tab_ai, tab_port, tab_add, tab_debt, tab_sim, tab_share = st.tabs([
     "💬 AI CFO Copilot",
-    "📊 Wealth & Real Estate Analytics",
-    "➕ Add Asset (Dynamic Engine)",
-    "💳 Debt & Liabilities",
-    "🎯 8–10 Yr Growth Simulator"
+    "📊 Portfolio & Yields",
+    "➕ Add Asset (Dynamic)",
+    "💳 Liabilities & Debt",
+    "🎯 8–10 Yr Simulator",
+    "📲 Share & QR Code"
 ])
 
 # TAB 1: AI COPILOT
 with tab_ai:
-    st.subheader("🤖 Autonomous AI CFO Copilot")
+    st.subheader("🤖 Autonomous AI Wealth Copilot")
 
     if "messages" not in st.session_state:
         st.session_state.messages = [
-            {"role": "assistant", "content": "I am your AI CFO. I have full real-time access to your portfolio, real estate metrics, bullion holdings, equities, and liabilities. Ask me for portfolio reviews, scenario simulations, or strategic advice!"}
+            {"role": "assistant", "content": "I am your AI CFO. I have live context on your bullion, real estate yields, stocks, mutual funds, and debt. What would you like to analyze or project today?"}
         ]
 
     for m in st.session_state.messages:
@@ -270,14 +310,7 @@ with tab_ai:
                     """
                     
                     full_prompt = f"{context}\n\nUser Question: {query}"
-                    
-                    candidate_models = [
-                        "gemini-1.5-flash-latest",
-                        "gemini-1.5-flash",
-                        "gemini-1.5-pro",
-                        "gemini-pro"
-                    ]
-                    
+                    candidate_models = ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
                     response_text = ""
                     success = False
                     
@@ -312,11 +345,11 @@ with tab_ai:
                         st.markdown(response_text)
                         st.session_state.messages.append({"role": "assistant", "content": response_text})
                     else:
-                        err_out = f"❌ Could not initialize an available Gemini model. Please confirm API access at aistudio.google.com."
+                        err_out = "❌ Could not initialize an active Gemini model. Please check your API key at aistudio.google.com."
                         st.error(err_out)
                         st.session_state.messages.append({"role": "assistant", "content": err_out})
 
-# TAB 2: WEALTH & REAL ESTATE ANALYTICS
+# TAB 2: PORTFOLIO & YIELDS
 with tab_port:
     if not assets_df.empty:
         col1, col2 = st.columns([1.2, 1])
@@ -339,7 +372,7 @@ with tab_port:
     else:
         st.info("No assets configured. Use the 'Add Asset' tab to initialize your portfolio.")
 
-# TAB 3: DYNAMIC ASSET SETUP
+# TAB 3: DYNAMIC ASSET ENGINE
 with tab_add:
     st.subheader("➕ Dynamic Asset Setup Engine")
     cat = st.selectbox("Asset Class", [
@@ -462,3 +495,28 @@ with tab_sim:
     st.plotly_chart(fig_sim, use_container_width=True)
     if not df_p.empty:
         st.success(f"Estimated Corpus at Year {yrs}: **₹{df_p.iloc[-1]['Projected Corpus (INR)']:,.2f} INR**")
+
+# TAB 6: SHARE & QR CODE
+with tab_share:
+    st.subheader("📲 Share VaultCFO")
+    st.caption("Generate dynamic QR codes and direct links to share your application.")
+    
+    app_url = st.text_input("Application Web Link", value="https://ai-cfo-dashboard-ec5qpbk75mqy36pkoxttmw.streamlit.app/")
+    
+    col_qr1, col_qr2 = st.columns([1, 2])
+    with col_qr1:
+        qr_bytes = generate_qr_image(app_url)
+        st.image(qr_bytes, caption="Scan to open VaultCFO on mobile", width=220)
+        st.download_button(
+            label="📥 Download QR Code PNG",
+            data=qr_bytes,
+            file_name="vaultcfo_qr.png",
+            mime="image/png"
+        )
+    with col_qr2:
+        st.markdown(f"""
+        **Direct Link:** [{app_url}]({app_url})
+        
+        * **Mobile Access:** Open camera and scan this code to access your portfolio on iOS/Android.
+        * **PWA Setup:** In Safari/Chrome on mobile, tap **Share** $\rightarrow$ **Add to Home Screen** to install it like a native app.
+        """)

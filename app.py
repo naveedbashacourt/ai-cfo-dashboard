@@ -55,7 +55,6 @@ CREATE TABLE IF NOT EXISTS liabilities (
 conn.commit()
 
 # ----------------- SECRETS & AI SETUP -----------------
-# Pulls GEMINI_API_KEY from Streamlit Cloud Secrets automatically
 api_key = ""
 if "GEMINI_API_KEY" in st.secrets:
     api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
@@ -238,7 +237,7 @@ with tab_ai:
 
     if "messages" not in st.session_state:
         st.session_state.messages = [
-            {"role": "assistant", "content": "I am your AI CFO. I have full context on your bullion, real estate CAGR, rental yields, mutual funds, and liabilities. Ask me for portfolio reviews, scenario simulations, or strategic growth advice!"}
+            {"role": "assistant", "content": "I am your AI CFO. I have full real-time access to your portfolio, real estate metrics, bullion holdings, equities, and liabilities. Ask me for portfolio reviews, scenario simulations, or strategic advice!"}
         ]
 
     for m in st.session_state.messages:
@@ -257,33 +256,65 @@ with tab_ai:
                 st.session_state.messages.append({"role": "assistant", "content": err_msg})
             else:
                 with st.spinner("AI CFO analyzing your financial ledger..."):
-                    try:
-                        # Fallback list for standard generative models
-                        model_name = "gemini-1.5-flash"
-                        model = genai.GenerativeModel(
-                            model_name=model_name,
-                            system_instruction="You are a seasoned Personal AI CFO. Provide data-driven, mathematically precise financial advice referencing the user's specific assets, bullion weights, debts, and rental yields."
-                        )
-                        
-                        context = f"""
-                        User Portfolio Snapshot:
-                        - True Net Worth: INR {net_worth:,.2f}
-                        - Total Assets: INR {total_current_inr:,.2f}
-                        - Total Invested: INR {total_invested_inr:,.2f}
-                        - Unrealized Gain/Loss: INR {unrealized_pnl:,.2f} ({unrealized_pnl_pct:.2f}%)
-                        - Total Debt: INR {total_liabilities:,.2f}
-                        - Annual Rental Cash Flow: INR {annual_rental_cashflow:,.2f}
-                        - Holdings Breakdown: {assets_df.to_dict(orient='records') if not assets_df.empty else 'No assets entered yet.'}
-                        - Debt Breakdown: {liabs_raw.to_dict(orient='records') if not liabs_raw.empty else 'No debt active.'}
-                        """
-                        
-                        res = model.generate_content(f"{context}\n\nUser Question: {query}")
-                        st.markdown(res.text)
-                        st.session_state.messages.append({"role": "assistant", "content": res.text})
-                    except Exception as e:
-                        err_text = f"AI Error: `{str(e)}`"
-                        st.error(err_text)
-                        st.session_state.messages.append({"role": "assistant", "content": err_text})
+                    context = f"""
+                    You are an institutional Personal AI CFO.
+                    User Portfolio Snapshot:
+                    - True Net Worth: INR {net_worth:,.2f}
+                    - Total Assets: INR {total_current_inr:,.2f}
+                    - Total Invested: INR {total_invested_inr:,.2f}
+                    - Unrealized Gain/Loss: INR {unrealized_pnl:,.2f} ({unrealized_pnl_pct:.2f}%)
+                    - Total Debt: INR {total_liabilities:,.2f}
+                    - Annual Rental Cash Flow: INR {annual_rental_cashflow:,.2f}
+                    - Holdings Breakdown: {assets_df.to_dict(orient='records') if not assets_df.empty else 'No assets recorded.'}
+                    - Debt Breakdown: {liabs_raw.to_dict(orient='records') if not liabs_raw.empty else 'No debt active.'}
+                    """
+                    
+                    full_prompt = f"{context}\n\nUser Question: {query}"
+                    
+                    candidate_models = [
+                        "gemini-1.5-flash-latest",
+                        "gemini-1.5-flash",
+                        "gemini-1.5-pro",
+                        "gemini-pro"
+                    ]
+                    
+                    response_text = ""
+                    success = False
+                    
+                    for m_name in candidate_models:
+                        try:
+                            model = genai.GenerativeModel(m_name)
+                            res = model.generate_content(full_prompt)
+                            if res and res.text:
+                                response_text = res.text
+                                success = True
+                                break
+                        except Exception:
+                            continue
+
+                    if not success:
+                        try:
+                            for m in genai.list_models():
+                                if "generateContent" in m.supported_generation_methods:
+                                    try:
+                                        dynamic_model = genai.GenerativeModel(m.name)
+                                        res = dynamic_model.generate_content(full_prompt)
+                                        if res and res.text:
+                                            response_text = res.text
+                                            success = True
+                                            break
+                                    except Exception:
+                                        continue
+                        except Exception as list_err:
+                            response_text = f"API Resolution Error: {str(list_err)}"
+
+                    if success:
+                        st.markdown(response_text)
+                        st.session_state.messages.append({"role": "assistant", "content": response_text})
+                    else:
+                        err_out = f"❌ Could not initialize an available Gemini model. Please confirm API access at aistudio.google.com."
+                        st.error(err_out)
+                        st.session_state.messages.append({"role": "assistant", "content": err_out})
 
 # TAB 2: WEALTH & REAL ESTATE ANALYTICS
 with tab_port:

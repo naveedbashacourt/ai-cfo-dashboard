@@ -1,17 +1,18 @@
 import sqlite3
 import hashlib
+import requests
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 
-st.set_page_config(page_title="Personal AI CFO Pro", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Personal AI CFO Enterprise", layout="wide", page_icon="🏛️")
 
-# ----------------- DATABASE INITIALIZATION -----------------
-conn = sqlite3.connect("cfo_platform.db", check_same_thread=False)
+# ----------------- DATABASE SCHEMA -----------------
+conn = sqlite3.connect("cfo_enterprise.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Users Table
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -19,26 +20,33 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT
 )
 """)
-
-# Assets Table linked to user_id
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS assets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     name TEXT,
     category TEXT,
-    ticker TEXT,
+    identifier TEXT, -- Ticker or AMFI Scheme Code
     quantity REAL,
     unit TEXT,
     buy_price REAL,
-    current_price REAL,
+    interest_rate REAL,
     currency TEXT,
-    total_inr REAL,
     FOREIGN KEY (user_id) REFERENCES users(id)
 )
 """)
-
-# Transactions Table linked to user_id
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS liabilities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    name TEXT,
+    category TEXT,
+    principal_outstanding REAL,
+    interest_rate REAL,
+    monthly_emi REAL,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+)
+""")
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,23 +61,38 @@ CREATE TABLE IF NOT EXISTS transactions (
 """)
 conn.commit()
 
-# ----------------- HELPER FUNCTIONS -----------------
-AED_TO_INR = 22.80
+# ----------------- LIVE MARKET DATA ENGINES -----------------
+AED_TO_INR = 22.85
+USD_TO_INR = 86.50
+
+@st.cache_data(ttl=600)
+def fetch_mf_nav(scheme_code):
+    """Fetches live NAV from AMFI via MFAPI."""
+    try:
+        url = f"https://api.mfapi.in/mf/{scheme_code}/latest"
+        res = requests.get(url, timeout=4).json()
+        if res.get("status") == "SUCCESS" and res.get("data"):
+            return float(res["data"][0]["nav"]), res.get("meta", {}).get("scheme_name", scheme_code)
+    except Exception:
+        pass
+    return None, None
+
+@st.cache_data(ttl=300)
+def fetch_live_market_price(ticker):
+    """Fetches live equity/commodity price via Yahoo Finance."""
+    if not ticker:
+        return 0.0
+    try:
+        t = yf.Ticker(ticker)
+        todays_data = t.history(period="1d")
+        if not todays_data.empty:
+            return round(float(todays_data["Close"].iloc[-1]), 2)
+    except Exception:
+        pass
+    return 0.0
 
 def hash_pw(password):
     return hashlib.sha256(password.encode()).hexdigest()
-
-def get_live_asset_price(ticker, default_price):
-    if not ticker:
-        return default_price
-    try:
-        data = yf.Ticker(ticker)
-        todays_data = data.history(period='1d')
-        if not todays_data.empty:
-            return round(float(todays_data['Close'].iloc[-1]), 2)
-    except Exception:
-        pass
-    return default_price
 
 # ----------------- AUTHENTICATION MODULE -----------------
 if "authenticated" not in st.session_state:
@@ -77,188 +100,297 @@ if "authenticated" not in st.session_state:
     st.session_state.user_id = None
     st.session_state.username = ""
 
-def login_register_page():
-    st.title("🔒 Personal AI CFO — Sign In / Register")
-    st.caption("All financial data is private and encrypted to your individual account.")
+def auth_screen():
+    st.title("🏛️ Personal AI CFO — Institutional Wealth Platform")
+    st.caption("Kuvera & INDmoney-grade asset valuation with bank-grade local session isolation.")
+    tab_log, tab_reg = st.tabs(["Secure Login", "Open Private Account"])
     
-    tab1, tab2 = st.tabs(["Login", "Create Account"])
-    
-    with tab1:
-        u_login = st.text_input("Username", key="login_u")
-        p_login = st.text_input("Password", type="password", key="login_p")
+    with tab_log:
+        u = st.text_input("Username", key="login_u")
+        p = st.text_input("Password", type="password", key="login_p")
         if st.button("Log In", use_container_width=True):
-            cursor.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (u_login, hash_pw(p_login)))
+            cursor.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (u, hash_pw(p)))
             res = cursor.fetchone()
             if res:
                 st.session_state.authenticated = True
                 st.session_state.user_id = res[0]
-                st.session_state.username = u_login
+                st.session_state.username = u
                 st.rerun()
             else:
-                st.error("Invalid username or password.")
+                st.error("Invalid credentials.")
 
-    with tab2:
-        u_reg = st.text_input("Choose Username", key="reg_u")
-        p_reg = st.text_input("Choose Password", type="password", key="reg_p")
-        if st.button("Register Account", use_container_width=True):
-            if u_reg and p_reg:
+    with tab_reg:
+        ru = st.text_input("Create Username", key="reg_u")
+        rp = st.text_input("Create Password", type="password", key="reg_p")
+        if st.button("Create Account", use_container_width=True):
+            if ru and rp:
                 try:
-                    cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (u_reg, hash_pw(p_reg)))
+                    cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (ru, hash_pw(rp)))
                     conn.commit()
-                    st.success("Account created successfully! You can now log in.")
+                    st.success("Account initialized! Please log in.")
                 except sqlite3.IntegrityError:
-                    st.error("Username already taken.")
-            else:
-                st.warning("Please fill in both fields.")
+                    st.error("Username already registered.")
 
 if not st.session_state.authenticated:
-    login_register_page()
+    auth_screen()
     st.stop()
 
-# ----------------- MAIN APP (AUTHENTICATED) -----------------
-user_id = st.session_state.user_id
+# ----------------- LOGGED IN DASHBOARD -----------------
+uid = st.session_state.user_id
 
 with st.sidebar:
-    st.write(f"Logged in as: **{st.session_state.username}**")
-    if st.button("Logout"):
+    st.title(f"👤 {st.session_state.username}")
+    if st.button("Logout", use_container_width=True):
         st.session_state.authenticated = False
         st.session_state.user_id = None
         st.rerun()
+    st.divider()
+    st.caption("Live Benchmarks:")
+    st.caption(f"• USD/INR: ₹{USD_TO_INR}")
+    st.caption(f"• AED/INR: ₹{AED_TO_INR}")
 
-st.title("💼 Personal AI CFO Dashboard")
+# --- DATA FETCHING & LIVE VALUATION ---
+assets_raw = pd.read_sql(f"SELECT * FROM assets WHERE user_id = {uid}", conn)
+liabs_raw = pd.read_sql(f"SELECT * FROM liabilities WHERE user_id = {uid}", conn)
+trans_raw = pd.read_sql(f"SELECT * FROM transactions WHERE user_id = {uid}", conn)
 
-# Fetch User-Specific Data
-assets_df = pd.read_sql(f"SELECT * FROM assets WHERE user_id = {user_id}", conn)
-trans_df = pd.read_sql(f"SELECT * FROM transactions WHERE user_id = {user_id}", conn)
+processed_assets = []
+total_invested_inr = 0.0
+total_current_inr = 0.0
 
-# Recalculate Live Net Worth
-if not assets_df.empty:
-    for idx, row in assets_df.iterrows():
-        if row['ticker']:
-            live_price = get_live_asset_price(row['ticker'], row['current_price'])
-            unit_val = live_price if live_price > 0 else row['current_price']
-            total = (row['quantity'] * unit_val) * (AED_TO_INR if row['currency'] == 'AED' else 1.0)
-            assets_df.at[idx, 'current_price'] = unit_val
-            assets_df.at[idx, 'total_inr'] = total
+for _, row in assets_raw.iterrows():
+    qty = row["quantity"]
+    buy_p = row["buy_price"]
+    currency = row["currency"]
+    multiplier = AED_TO_INR if currency == "AED" else (USD_TO_INR if currency == "USD" else 1.0)
+    
+    invested_val = (qty * buy_p) * multiplier
+    current_unit_p = buy_p
+    asset_title = row["name"]
 
-total_net_worth = assets_df["total_inr"].sum() if not assets_df.empty else 0.0
+    # Live Mutual Fund Valuation (AMFI)
+    if row["category"] == "Mutual Funds" and row["identifier"]:
+        live_nav, scheme_name = fetch_mf_nav(row["identifier"])
+        if live_nav:
+            current_unit_p = live_nav
+            if scheme_name:
+                asset_title = scheme_name
 
-# Calculate Burn Rate and Runway
-if not trans_df.empty and "type" in trans_df.columns:
-    debits = trans_df[trans_df["type"] == "DEBIT"]
-    unique_months = max(1, len(trans_df["date"].astype(str).str.slice(0, 7).unique()))
-    monthly_burn = debits["amount"].sum() / unique_months
-else:
-    monthly_burn = 0.0
+    # Live Stock Valuation (NSE / BSE / US)
+    elif row["category"] in ["Indian Equities (NSE/BSE)", "US Equities"] and row["identifier"]:
+        live_p = fetch_live_market_price(row["identifier"])
+        if live_p > 0:
+            current_unit_p = live_p
 
-liquid_cats = ["Savings/Bank", "Bullion (Gold/Silver)", "Stocks / Demat", "Mutual Funds"]
-liquid_assets = assets_df[assets_df["category"].isin(liquid_cats)]["total_inr"].sum() if not assets_df.empty else 0.0
-runway = (liquid_assets / monthly_burn) if monthly_burn > 0 else 0.0
+    # Fixed Deposits / EPF / PPF Compounding Accrual
+    elif row["category"] in ["Fixed Deposit", "EPF / PPF / Sukanya"]:
+        rate = row["interest_rate"] or 7.0
+        current_unit_p = buy_p * (1 + (rate / 100)) # 1-year annualized projection
+    
+    current_val = (qty * current_unit_p) * multiplier
+    pnl = current_val - invested_val
+    pnl_pct = (pnl / invested_val * 100) if invested_val > 0 else 0.0
 
-# ----------------- TOP METRIC TILES -----------------
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total Net Worth", f"₹{total_net_worth:,.2f}")
-col2.metric("Liquid Capital", f"₹{liquid_assets:,.2f}")
-col3.metric("Est. Monthly Burn", f"₹{monthly_burn:,.2f}")
-col4.metric("Emergency Runway", f"{runway:.1f} Months" if monthly_burn > 0 else "N/A")
+    total_invested_inr += invested_val
+    total_current_inr += current_val
+
+    processed_assets.append({
+        "ID": row["id"],
+        "Name": asset_title,
+        "Category": row["category"],
+        "Holdings": f"{qty:,.2f} {row['unit']}",
+        "Buy Price": f"{currency} {buy_p:,.2f}",
+        "Current Price": f"{currency} {current_unit_p:,.2f}",
+        "Invested (INR)": invested_val,
+        "Current Value (INR)": current_val,
+        "P&L (INR)": pnl,
+        "P&L (%)": pnl_pct
+    })
+
+assets_df = pd.DataFrame(processed_assets)
+total_liabilities = liabs_raw["principal_outstanding"].sum() if not liabs_raw.empty else 0.0
+net_worth = total_current_inr - total_liabilities
+unrealized_pnl = total_current_inr - total_invested_inr
+unrealized_pnl_pct = (unrealized_pnl / total_invested_inr * 100) if total_invested_inr > 0 else 0.0
+
+# ----------------- TOP KPIS -----------------
+st.title("💼 Enterprise Wealth & AI CFO Dashboard")
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("True Net Worth", f"₹{net_worth:,.2f}", delta=f"{unrealized_pnl_pct:.2f}% Overall Return")
+c2.metric("Total Asset Value", f"₹{total_current_inr:,.2f}", f"₹{total_invested_inr:,.2f} Invested")
+c3.metric("Total Liabilities", f"₹{total_liabilities:,.2f}", delta_color="inverse")
+c4.metric("Unrealized Profit/Loss", f"₹{unrealized_pnl:,.2f}", f"{unrealized_pnl_pct:.2f}%")
 
 st.divider()
 
-# ----------------- MAIN LAYOUT -----------------
-col_left, col_right = st.columns([1, 1.2])
+# ----------------- PLATFORM TABS -----------------
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 Portfolio & Analytics",
+    "➕ Add Assets (All Classes)",
+    "💳 Liabilities & Debt",
+    "🎯 8–10 Year Wealth & Goal Simulator",
+    "📥 Statement Parser"
+])
 
-with col_left:
-    st.subheader("➕ Add New Asset")
-    category = st.selectbox(
-        "Asset Class",
-        ["Bullion (Gold/Silver)", "Stocks / Demat", "Mutual Funds", "Savings/Bank", "Fixed Deposit", "Real Estate"]
-    )
-    
-    name = st.text_input("Asset Label / Institution (e.g., Ogold, Zerodha, HDFC, Emaar)")
-    currency = st.radio("Base Currency", ["INR (₹)", "AED (Dhs)"], horizontal=True)
-    curr_code = "AED" if "AED" in currency else "INR"
-
-    if category == "Bullion (Gold/Silver)":
-        metal = st.selectbox("Metal Type", ["Gold (24K)", "Silver"])
-        grams = st.number_input("Weight in Grams", min_value=0.001, step=1.0, format="%.4f")
-        price_g = st.number_input(f"Price per Gram ({curr_code})", min_value=0.1, value=7200.0 if "Gold" in metal else 88.0)
-        total_val = (grams * price_g) * (AED_TO_INR if curr_code == "AED" else 1.0)
-        
-        if st.button("Save Bullion Entry", use_container_width=True):
-            cursor.execute(
-                "INSERT INTO assets (user_id, name, category, ticker, quantity, unit, buy_price, current_price, currency, total_inr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (user_id, f"{name} ({metal})", category, "", grams, "grams", price_g, price_g, curr_code, total_val)
-            )
-            conn.commit()
-            st.rerun()
-
-    elif category in ["Stocks / Demat", "Mutual Funds"]:
-        ticker = st.text_input("Yahoo Finance Ticker (optional for live price, e.g. RELIANCE.NS, INFOSYS.BO)")
-        units = st.number_input("Shares / NAV Units", min_value=0.001, step=1.0, format="%.3f")
-        price = st.number_input(f"Purchase Price / NAV ({curr_code})", min_value=0.1, step=10.0)
-        total_val = (units * price) * (AED_TO_INR if curr_code == "AED" else 1.0)
-
-        if st.button("Save Investment Entry", use_container_width=True):
-            cursor.execute(
-                "INSERT INTO assets (user_id, name, category, ticker, quantity, unit, buy_price, current_price, currency, total_inr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (user_id, name, category, ticker, units, "units", price, price, curr_code, total_val)
-            )
-            conn.commit()
-            st.rerun()
-
-    else:
-        amount = st.number_input(f"Total Value / Balance ({curr_code})", min_value=0.0, step=5000.0)
-        total_val = amount * (AED_TO_INR if curr_code == "AED" else 1.0)
-
-        if st.button("Save Asset Entry", use_container_width=True):
-            cursor.execute(
-                "INSERT INTO assets (user_id, name, category, ticker, quantity, unit, buy_price, current_price, currency, total_inr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (user_id, name, category, "", 1, "lump_sum", amount, amount, curr_code, total_val)
-            )
-            conn.commit()
-            st.rerun()
-
-    st.divider()
-    st.subheader("📥 Upload Statement (CSV)")
-    uploaded_file = st.file_uploader("Upload Bank or Card CSV", type=["csv"])
-    if uploaded_file and st.button("Parse & Import Transactions", use_container_width=True):
-        df = pd.read_csv(uploaded_file)
-        df['user_id'] = user_id
-        df.to_sql("transactions", conn, if_exists="append", index=False)
-        st.success("Transactions loaded into your private ledger.")
-        st.rerun()
-
-with col_right:
-    st.subheader("📊 Portfolio Breakdown")
+# TAB 1: PORTFOLIO & ANALYTICS
+with tab1:
     if not assets_df.empty:
-        # Donut Chart for Asset Allocation
-        fig = px.pie(assets_df, values="total_inr", names="category", hole=0.45, title="Asset Allocation Breakdown")
-        fig.update_layout(margin=dict(t=30, b=0, l=0, r=0))
-        st.plotly_chart(fig, use_container_width=True)
+        col_g1, col_g2 = st.columns([1.2, 1])
+        with col_g1:
+            fig_alloc = px.pie(assets_df, values="Current Value (INR)", names="Category", hole=0.5, title="Asset Allocation Breakdown")
+            st.plotly_chart(fig_alloc, use_container_width=True)
+        with col_g2:
+            fig_pnl = px.bar(assets_df, x="Category", y="P&L (INR)", color="P&L (INR)", color_continuous_scale="Temps", title="Unrealized Gain/Loss by Class")
+            st.plotly_chart(fig_pnl, use_container_width=True)
 
-        # Asset Table
-        display_df = assets_df.copy()
-        display_df["Total (INR)"] = display_df["total_inr"].apply(lambda x: f"₹{x:,.2f}")
-        display_df["Holding"] = display_df.apply(lambda r: f"{r['quantity']} {r['unit']}", axis=1)
+        st.subheader("Asset Holdings Table")
         st.dataframe(
-            display_df[["id", "name", "category", "Holding", "currency", "Total (INR)"]],
+            assets_df[["ID", "Name", "Category", "Holdings", "Buy Price", "Current Price", "Current Value (INR)", "P&L (%)"]],
             use_container_width=True,
             hide_index=True
         )
 
-        del_id = st.number_input("Remove Entry by ID", min_value=1, step=1)
+        del_id = st.number_input("Delete Holding Entry by ID", min_value=1, step=1)
         if st.button("Delete Entry"):
-            cursor.execute("DELETE FROM assets WHERE id = ? AND user_id = ?", (del_id, user_id))
+            cursor.execute("DELETE FROM assets WHERE id = ? AND user_id = ?", (del_id, uid))
             conn.commit()
-            st.success("Asset removed.")
+            st.success("Entry removed.")
             st.rerun()
     else:
-        st.info("No assets tracked yet. Add bullion, equities, or accounts on the left.")
+        st.info("No assets configured. Use the 'Add Assets' tab to initialize your portfolio.")
 
-    st.subheader("💳 Expense Insights")
-    if not trans_df.empty:
-        cat_exp = trans_df[trans_df["type"] == "DEBIT"].groupby("category")["amount"].sum().reset_index()
-        fig_bar = px.bar(cat_exp, x="category", y="amount", title="Spending by Category (INR)")
-        st.plotly_chart(fig_bar, use_container_width=True)
-    else:
-        st.caption("Upload debit transactions to generate spending charts.")
+# TAB 2: MULTI-ASSET CREATION ENGINE
+with tab2:
+    st.subheader("Add Asset Across Any Financial Class")
+    cat = st.selectbox("Select Asset Category", [
+        "Mutual Funds",
+        "Indian Equities (NSE/BSE)",
+        "Bullion (Gold/Silver)",
+        "Fixed Deposit",
+        "EPF / PPF / Sukanya",
+        "US Equities",
+        "Savings / Liquid Cash",
+        "Real Estate"
+    ])
+
+    cur = st.radio("Currency Denomination", ["INR", "AED", "USD"], horizontal=True)
+
+    with st.form("asset_creation_form"):
+        name_input = st.text_input("Asset Label / Platform Name (e.g. Parag Parikh Flexi Cap, Ogold, Zerodha, HDFC Bank)")
+        
+        if cat == "Mutual Funds":
+            st.caption("💡 Enter the AMFI Scheme Code for automated daily NAV tracking (e.g. 122639 for Parag Parikh Flexi Cap).")
+            identifier = st.text_input("AMFI Scheme Code (6 digits)")
+            qty = st.number_input("Total Units Held", min_value=0.001, step=1.0, format="%.3f")
+            buy_p = st.number_input("Average Purchase NAV", min_value=0.01, step=1.0)
+            ir = 0.0
+            unit = "units"
+
+        elif cat == "Indian Equities (NSE/BSE)":
+            st.caption("💡 Add Yahoo Ticker: e.g. RELIANCE.NS, ARVSMART.NS, TCS.NS")
+            identifier = st.text_input("NSE/BSE Ticker")
+            qty = st.number_input("Number of Shares", min_value=1.0, step=1.0)
+            buy_p = st.number_input("Average Buy Price per Share", min_value=0.1, step=1.0)
+            ir = 0.0
+            unit = "shares"
+
+        elif cat == "Bullion (Gold/Silver)":
+            metal = st.selectbox("Metal", ["Gold 24K", "Silver"])
+            identifier = "GC=F" if "Gold" in metal else "SI=F"
+            qty = st.number_input("Total Grams", min_value=0.0001, step=1.0, format="%.4f")
+            buy_p = st.number_input(f"Purchase Price per Gram ({cur})", min_value=0.1, step=10.0)
+            ir = 0.0
+            unit = "grams"
+
+        elif cat in ["Fixed Deposit", "EPF / PPF / Sukanya"]:
+            identifier = ""
+            qty = 1.0
+            buy_p = st.number_input(f"Principal Deposit Amount ({cur})", min_value=100.0, step=5000.0)
+            ir = st.number_input("Annual Interest Rate (%)", min_value=1.0, value=7.1, step=0.1)
+            unit = "deposit"
+
+        else:
+            identifier = ""
+            qty = 1.0
+            buy_p = st.number_input(f"Current Estimated Value / Cash Balance ({cur})", min_value=1.0, step=10000.0)
+            ir = 0.0
+            unit = "lump_sum"
+
+        if st.form_submit_button("Add Asset to Portfolio", use_container_width=True):
+            cursor.execute(
+                "INSERT INTO assets (user_id, name, category, identifier, quantity, unit, buy_price, interest_rate, currency) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (uid, name_input, cat, identifier, qty, unit, buy_p, ir, cur)
+            )
+            conn.commit()
+            st.success("Asset added to institutional ledger.")
+            st.rerun()
+
+# TAB 3: LIABILITIES & DEBT TRACKER
+with tab3:
+    st.subheader("Liabilities, Loans & EMIs")
+    with st.form("liability_form"):
+        l_name = st.text_input("Liability Name (e.g. Home Loan HDFC, Auto Loan, Credit Card)")
+        l_cat = st.selectbox("Category", ["Home Loan", "Vehicle Loan", "Personal Loan", "Credit Card Debt", "Builder Installment Plan"])
+        l_prin = st.number_input("Principal Outstanding Balance (INR)", min_value=0.0, step=25000.0)
+        l_rate = st.number_input("Interest Rate (%)", min_value=0.0, value=8.5, step=0.1)
+        l_emi = st.number_input("Monthly EMI Amount (INR)", min_value=0.0, step=1000.0)
+        
+        if st.form_submit_button("Record Liability", use_container_width=True):
+            cursor.execute(
+                "INSERT INTO liabilities (user_id, name, category, principal_outstanding, interest_rate, monthly_emi) VALUES (?, ?, ?, ?, ?, ?)",
+                (uid, l_name, l_cat, l_prin, l_rate, l_emi)
+            )
+            conn.commit()
+            st.success("Liability updated.")
+            st.rerun()
+
+    if not liabs_raw.empty:
+        st.dataframe(liabs_raw[["id", "name", "category", "principal_outstanding", "interest_rate", "monthly_emi"]], use_container_width=True)
+
+# TAB 4: 8-10 YEAR WEALTH & GOAL SIMULATOR
+with tab4:
+    st.subheader("🎯 Long-Term Wealth Projection Engine")
+    st.caption("Simulate portfolio compounding across an 8–10 year horizon for targeted milestones.")
+
+    col_s1, col_s2, col_s3 = st.columns(3)
+    monthly_sip = col_s1.number_input("Monthly Portfolio Addition (INR)", value=50000, step=5000)
+    expected_cagr = col_s2.slider("Expected Portfolio CAGR (%)", 6.0, 20.0, 12.0, 0.5)
+    horizon_years = col_s3.slider("Time Horizon (Years)", 3, 20, 10)
+
+    # Compounding Calculation
+    months = horizon_years * 12
+    monthly_rate = (expected_cagr / 100) / 12
+    
+    projection_data = []
+    current_running_val = total_current_inr
+
+    for m in range(1, months + 1):
+        current_running_val = (current_running_val + monthly_sip) * (1 + monthly_rate)
+        if m % 12 == 0:
+            projection_data.append({
+                "Year": m // 12,
+                "Projected Wealth (INR)": round(current_running_val, 2)
+            })
+
+    proj_df = pd.DataFrame(projection_data)
+    fig_proj = px.line(proj_df, x="Year", y="Projected Wealth (INR)", markers=True, title=f"Projected Net Worth Over {horizon_years} Years (@ {expected_cagr}% CAGR)")
+    st.plotly_chart(fig_proj, use_container_width=True)
+
+    if not proj_df.empty:
+        final_val = proj_df.iloc[-1]["Projected Wealth (INR)"]
+        st.success(f"Estimated Corpus at Year {horizon_years}: **₹{final_val:,.2f} INR**")
+
+# TAB 5: STATEMENT PARSER
+with tab5:
+    st.subheader("Automated Statement & Expense Analyzer")
+    csv_file = st.file_uploader("Upload Bank/Credit Card Statement CSV", type=["csv"])
+    if csv_file and st.button("Parse Transactions"):
+        tdf = pd.read_csv(csv_file)
+        tdf["user_id"] = uid
+        tdf.to_sql("transactions", conn, if_exists="append", index=False)
+        st.success(f"Parsed {len(tdf)} records.")
+        st.rerun()
+
+    if not trans_raw.empty:
+        st.dataframe(trans_raw[["date", "description", "category", "amount", "type"]], use_container_width=True)

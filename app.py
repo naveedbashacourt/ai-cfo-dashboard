@@ -62,6 +62,34 @@ CREATE TABLE IF NOT EXISTS liabilities (
 """)
 conn.commit()
 
+# ----------------- LIVE REAL-TIME FOREX ENGINE -----------------
+@st.cache_data(ttl=300)
+def fetch_live_fx_rates():
+    """Fetches real-time market exchange rates for USD/INR and AED/INR."""
+    rates = {"USD": 87.50, "AED": 23.80} # Safe baseline defaults
+    try:
+        usd_data = yf.Ticker("USDINR=X").history(period="1d")
+        if not usd_data.empty:
+            rates["USD"] = round(float(usd_data["Close"].iloc[-1]), 2)
+    except Exception:
+        pass
+
+    try:
+        aed_data = yf.Ticker("AEDINR=X").history(period="1d")
+        if not aed_data.empty:
+            rates["AED"] = round(float(aed_data["Close"].iloc[-1]), 2)
+        else:
+            # Fallback calculation via AED pegged to USD (3.6725)
+            rates["AED"] = round(rates["USD"] / 3.6725, 2)
+    except Exception:
+        rates["AED"] = round(rates["USD"] / 3.6725, 2)
+
+    return rates
+
+live_fx = fetch_live_fx_rates()
+USD_TO_INR = live_fx["USD"]
+AED_TO_INR = live_fx["AED"]
+
 # ----------------- SECRETS & AI SETUP -----------------
 api_key = ""
 if "GEMINI_API_KEY" in st.secrets:
@@ -74,9 +102,6 @@ if api_key:
         ai_ready = True
     except Exception as e:
         st.sidebar.error(f"AI Config Error: {e}")
-
-AED_TO_INR = 22.85
-USD_TO_INR = 86.50
 
 def hash_pw(password):
     return hashlib.sha256(password.encode()).hexdigest()
@@ -184,9 +209,11 @@ with st.sidebar:
         st.success("⚡ Gemini AI Active")
     else:
         st.warning("⚠️ Add GEMINI_API_KEY in Secrets")
-    st.caption("Live Rates:")
-    st.caption(f"• USD/INR: ₹{USD_TO_INR}")
-    st.caption(f"• AED/INR: ₹{AED_TO_INR}")
+    
+    st.subheader("🌐 Live Exchange Rates")
+    st.metric(label="USD / INR", value=f"₹{USD_TO_INR:,.2f}")
+    st.metric(label="AED / INR", value=f"₹{AED_TO_INR:,.2f}")
+    st.caption("Live feed via Yahoo Finance FX Market")
 
 # Fetch User Data
 assets_raw = pd.read_sql(f"SELECT * FROM assets WHERE user_id = {uid}", conn)
@@ -298,6 +325,7 @@ with tab_ai:
                 with st.spinner("AI CFO analyzing your financial ledger..."):
                     context = f"""
                     You are an institutional Personal AI CFO.
+                    Live FX: USD/INR = {USD_TO_INR}, AED/INR = {AED_TO_INR}
                     User Portfolio Snapshot:
                     - True Net Worth: INR {net_worth:,.2f}
                     - Total Assets: INR {total_current_inr:,.2f}

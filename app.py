@@ -1,7 +1,7 @@
 import sqlite3
 import hashlib
-import requests
 import datetime
+import requests
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -54,6 +54,20 @@ CREATE TABLE IF NOT EXISTS liabilities (
 """)
 conn.commit()
 
+# ----------------- SECRETS & AI SETUP -----------------
+# Pulls GEMINI_API_KEY from Streamlit Cloud Secrets automatically
+api_key = ""
+if "GEMINI_API_KEY" in st.secrets:
+    api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
+
+ai_ready = False
+if api_key:
+    try:
+        genai.configure(api_key=api_key)
+        ai_ready = True
+    except Exception as e:
+        st.sidebar.error(f"AI Config Error: {e}")
+
 AED_TO_INR = 22.85
 USD_TO_INR = 86.50
 
@@ -105,18 +119,18 @@ if not st.session_state.authenticated:
                 st.session_state.username = u
                 st.rerun()
             else:
-                st.error("Invalid credentials.")
+                st.error("Invalid username or password.")
     with tab_reg:
-        ru = st.text_input("New Username", key="r_u")
-        rp = st.text_input("New Password", type="password", key="r_p")
+        ru = st.text_input("New Username", key="reg_u")
+        rp = st.text_input("New Password", type="password", key="reg_p")
         if st.button("Register Account", use_container_width=True):
             if ru and rp:
                 try:
                     cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (ru, hash_pw(rp)))
                     conn.commit()
-                    st.success("Account initialized! Please log in.")
+                    st.success("Account created successfully! Please log in.")
                 except sqlite3.IntegrityError:
-                    st.error("Username already registered.")
+                    st.error("Username already exists.")
     st.stop()
 
 # ----------------- LOGGED IN APP -----------------
@@ -130,12 +144,12 @@ with st.sidebar:
         st.session_state.user_id = None
         st.rerun()
     st.divider()
-    st.subheader("🔑 AI Brain")
-    gemini_key = st.text_input("Gemini API Key", type="password")
-    if gemini_key:
-        genai.configure(api_key=gemini_key)
+    if ai_ready:
+        st.success("⚡ Gemini AI Active (via Cloud Secrets)")
+    else:
+        st.warning("⚠️ No GEMINI_API_KEY detected in Streamlit Secrets.")
 
-# Fetch Records
+# Fetch Data
 assets_raw = pd.read_sql(f"SELECT * FROM assets WHERE user_id = {uid}", conn)
 liabs_raw = pd.read_sql(f"SELECT * FROM liabilities WHERE user_id = {uid}", conn)
 
@@ -155,7 +169,6 @@ for _, row in assets_raw.iterrows():
     current_unit_val = curr_p
     asset_name = row["name"]
 
-    # Live Lookups
     if row["category"] == "Mutual Funds" and row["identifier"]:
         nav, s_name = fetch_mf_nav(row["identifier"])
         if nav:
@@ -171,7 +184,6 @@ for _, row in assets_raw.iterrows():
     pnl = current_val - invested_val
     pnl_pct = (pnl / invested_val * 100) if invested_val > 0 else 0.0
 
-    # Real Estate CAGR Calculation
     holding_yrs = max(1, current_year - (row["purchase_year"] or current_year))
     cagr = (((current_val / invested_val) ** (1 / holding_yrs)) - 1) * 100 if invested_val > 0 and row["category"] == "Real Estate" else 0.0
 
@@ -201,7 +213,7 @@ net_worth = total_current_inr - total_liabilities
 unrealized_pnl = total_current_inr - total_invested_inr
 unrealized_pnl_pct = (unrealized_pnl / total_invested_inr * 100) if total_invested_inr > 0 else 0.0
 
-# ----------------- MAIN VIEW -----------------
+# ----------------- TOP METRICS -----------------
 st.title("💼 AI CFO Enterprise Hub")
 
 c1, c2, c3, c4 = st.columns(4)
@@ -222,45 +234,69 @@ tab_ai, tab_port, tab_add, tab_debt, tab_sim = st.tabs([
 
 # TAB 1: AI COPILOT
 with tab_ai:
-    st.subheader("🤖 Autonomous AI CFO")
+    st.subheader("🤖 Autonomous AI CFO Copilot")
+
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "I am your AI CFO. I have full context on your bullion, real estate CAGR, rental yields, mutual funds, and liabilities. Ask me for portfolio reviews or strategic advice!"}]
+        st.session_state.messages = [
+            {"role": "assistant", "content": "I am your AI CFO. I have full context on your bullion, real estate CAGR, rental yields, mutual funds, and liabilities. Ask me for portfolio reviews, scenario simulations, or strategic growth advice!"}
+        ]
 
     for m in st.session_state.messages:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
-    if query := st.chat_input("e.g. Analyze my real estate returns and suggest rebalancing options:"):
+    if query := st.chat_input("e.g. Analyze my asset allocation and suggest what to optimize:"):
         st.session_state.messages.append({"role": "user", "content": query})
         with st.chat_message("user"):
             st.markdown(query)
 
         with st.chat_message("assistant"):
-            if not gemini_key:
-                st.warning("Please enter your Gemini API Key in the left sidebar.")
+            if not ai_ready:
+                err_msg = "⚠️ Gemini API key not found in Streamlit Secrets. Please check your App Settings -> Secrets."
+                st.warning(err_msg)
+                st.session_state.messages.append({"role": "assistant", "content": err_msg})
             else:
-                with st.spinner("Analyzing portfolio ledger..."):
+                with st.spinner("AI CFO analyzing your financial ledger..."):
                     try:
-                        model = genai.GenerativeModel("gemini-1.5-flash")
-                        context = f"User Data: Assets: {assets_df.to_dict(orient='records')}, Debt: {liabs_raw.to_dict(orient='records')}, Net Worth: INR {net_worth}"
+                        # Fallback list for standard generative models
+                        model_name = "gemini-1.5-flash"
+                        model = genai.GenerativeModel(
+                            model_name=model_name,
+                            system_instruction="You are a seasoned Personal AI CFO. Provide data-driven, mathematically precise financial advice referencing the user's specific assets, bullion weights, debts, and rental yields."
+                        )
+                        
+                        context = f"""
+                        User Portfolio Snapshot:
+                        - True Net Worth: INR {net_worth:,.2f}
+                        - Total Assets: INR {total_current_inr:,.2f}
+                        - Total Invested: INR {total_invested_inr:,.2f}
+                        - Unrealized Gain/Loss: INR {unrealized_pnl:,.2f} ({unrealized_pnl_pct:.2f}%)
+                        - Total Debt: INR {total_liabilities:,.2f}
+                        - Annual Rental Cash Flow: INR {annual_rental_cashflow:,.2f}
+                        - Holdings Breakdown: {assets_df.to_dict(orient='records') if not assets_df.empty else 'No assets entered yet.'}
+                        - Debt Breakdown: {liabs_raw.to_dict(orient='records') if not liabs_raw.empty else 'No debt active.'}
+                        """
+                        
                         res = model.generate_content(f"{context}\n\nUser Question: {query}")
                         st.markdown(res.text)
                         st.session_state.messages.append({"role": "assistant", "content": res.text})
                     except Exception as e:
-                        st.error(f"Error: {e}")
+                        err_text = f"AI Error: `{str(e)}`"
+                        st.error(err_text)
+                        st.session_state.messages.append({"role": "assistant", "content": err_text})
 
-# TAB 2: PORTFOLIO & REAL ESTATE ANALYTICS
+# TAB 2: WEALTH & REAL ESTATE ANALYTICS
 with tab_port:
     if not assets_df.empty:
         col1, col2 = st.columns([1.2, 1])
         with col1:
-            fig_alloc = px.pie(assets_df, values="Current Value (INR)", names="Category", hole=0.5, title="Asset Allocation")
+            fig_alloc = px.pie(assets_df, values="Current Value (INR)", names="Category", hole=0.5, title="Asset Allocation Breakdown")
             st.plotly_chart(fig_alloc, use_container_width=True)
         with col2:
             fig_bar = px.bar(assets_df, x="Category", y="Current Value (INR)", color="Category", title="Capital by Asset Class")
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        st.subheader("Asset Holdings & Yield Ledger")
+        st.subheader("Asset Holdings Ledger")
         st.dataframe(assets_df, use_container_width=True, hide_index=True)
 
         del_id = st.number_input("Delete Holding by ID", min_value=1, step=1)
@@ -272,7 +308,7 @@ with tab_port:
     else:
         st.info("No assets configured. Use the 'Add Asset' tab to initialize your portfolio.")
 
-# TAB 3: DYNAMIC ASSET CREATION ENGINE
+# TAB 3: DYNAMIC ASSET SETUP
 with tab_add:
     st.subheader("➕ Dynamic Asset Setup Engine")
     cat = st.selectbox("Asset Class", [
@@ -288,7 +324,6 @@ with tab_add:
     with st.form("dynamic_asset_form"):
         name_input = st.text_input("Asset Label / Property Name / Institution")
 
-        # Dynamic Real Estate Fields
         if cat == "Real Estate":
             sub_type = st.selectbox("Property Type", ["Residential Apartment", "Commercial Office/Shop", "Independent House/Villa", "Plot / Land"])
             col_r1, col_r2 = st.columns(2)
@@ -304,7 +339,6 @@ with tab_add:
             qty = area
             unit = "sq_ft"
 
-        # Dynamic Bullion Fields
         elif cat == "Bullion (Gold / Silver)":
             sub_type = st.selectbox("Metal Type", ["Gold 24K", "Gold 22K", "Silver 999"])
             grams = st.number_input("Weight in Grams", min_value=0.0001, step=1.0, format="%.4f")
@@ -316,7 +350,6 @@ with tab_add:
             qty = grams
             unit = "grams"
 
-        # Dynamic Mutual Fund Fields
         elif cat == "Mutual Funds":
             sub_type = "Mutual Fund Direct"
             identifier = st.text_input("AMFI Scheme Code (e.g. 122639 for Parag Parikh Flexi Cap)")
@@ -327,7 +360,6 @@ with tab_add:
             p_year = current_year
             unit = "units"
 
-        # Dynamic Stock Fields
         elif cat == "Indian Equities (NSE/BSE)":
             sub_type = "Equity Stock"
             identifier = st.text_input("Yahoo Ticker (e.g. RELIANCE.NS, TCS.NS, ARVSMART.NS)")
@@ -338,7 +370,6 @@ with tab_add:
             p_year = current_year
             unit = "shares"
 
-        # Fixed Income / Cash
         else:
             sub_type = "Fixed Income / Liquid"
             identifier = ""
@@ -355,7 +386,7 @@ with tab_add:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (uid, name_input, cat, sub_type, identifier, qty, unit, buy_price, curr_price, monthly_rent, p_year, cur))
             conn.commit()
-            st.success(f"{name_input} added successfully.")
+            st.success(f"{name_input} recorded.")
             st.rerun()
 
 # TAB 4: DEBT & LIABILITIES

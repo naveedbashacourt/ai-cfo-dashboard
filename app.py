@@ -65,8 +65,8 @@ conn.commit()
 # ----------------- LIVE REAL-TIME FOREX ENGINE -----------------
 @st.cache_data(ttl=300)
 def fetch_live_fx_rates():
-    """Fetches real-time market exchange rates for USD/INR and AED/INR."""
-    rates = {"USD": 87.50, "AED": 23.80} # Safe baseline defaults
+    """Fetches real-time market exchange rates for USD/INR and AED/INR with fallback."""
+    rates = {"USD": 87.50, "AED": 23.83}
     try:
         usd_data = yf.Ticker("USDINR=X").history(period="1d")
         if not usd_data.empty:
@@ -79,7 +79,6 @@ def fetch_live_fx_rates():
         if not aed_data.empty:
             rates["AED"] = round(float(aed_data["Close"].iloc[-1]), 2)
         else:
-            # Fallback calculation via AED pegged to USD (3.6725)
             rates["AED"] = round(rates["USD"] / 3.6725, 2)
     except Exception:
         rates["AED"] = round(rates["USD"] / 3.6725, 2)
@@ -213,7 +212,7 @@ with st.sidebar:
     st.subheader("🌐 Live Exchange Rates")
     st.metric(label="USD / INR", value=f"₹{USD_TO_INR:,.2f}")
     st.metric(label="AED / INR", value=f"₹{AED_TO_INR:,.2f}")
-    st.caption("Live feed via Yahoo Finance FX Market")
+    st.caption("Live feed via FX Market")
 
 # Fetch User Data
 assets_raw = pd.read_sql(f"SELECT * FROM assets WHERE user_id = {uid}", conn)
@@ -294,7 +293,7 @@ tab_ai, tab_port, tab_add, tab_debt, tab_sim, tab_share = st.tabs([
     "📊 Portfolio & Yields",
     "➕ Add Asset (Dynamic)",
     "💳 Liabilities & Debt",
-    "🎯 8–10 Yr Simulator",
+    "🎯 8–10 Yr FIRE Simulator",
     "📲 Share & QR Code"
 ])
 
@@ -500,36 +499,105 @@ with tab_debt:
     if not liabs_raw.empty:
         st.dataframe(liabs_raw[["id", "name", "category", "principal_outstanding", "interest_rate", "monthly_emi"]], use_container_width=True)
 
-# TAB 5: SIMULATOR
+# TAB 5: DYNAMIC FIRE & GOAL-BASED SIMULATOR
 with tab_sim:
-    st.subheader("🎯 8–10 Year Wealth & Goal Simulator")
-    s1, s2, s3 = st.columns(3)
-    sip = s1.number_input("Monthly Allocation (INR)", value=50000, step=5000)
-    cagr = s2.slider("Expected CAGR (%)", 6.0, 20.0, 12.0, 0.5)
-    yrs = s3.slider("Horizon (Years)", 3, 20, 10)
+    st.subheader("🎯 Dynamic FIRE & Goal-Adjusted Wealth Engine")
+    st.caption("Calculate your exact Financial Independence number with custom inflation, withdrawal rates, and intermediate milestone goals.")
 
-    months = yrs * 12
-    monthly_r = (cagr / 100) / 12
-    current_val = total_current_inr
-    proj_rows = []
+    col_f1, col_f2, col_f3 = st.columns(3)
+    current_age = col_f1.number_input("Current Age", min_value=18, max_value=80, value=35, step=1)
+    target_fire_age = col_f2.number_input("Target Retirement / FIRE Age", min_value=current_age + 1, max_value=90, value=50, step=1)
+    monthly_living_exp = col_f3.number_input("Current Monthly Expenses (INR)", min_value=10000.0, value=75000.0, step=5000.0)
 
-    for m in range(1, months + 1):
-        current_val = (current_val + sip) * (1 + monthly_r)
+    col_p1, col_p2, col_p3 = st.columns(3)
+    monthly_sip_alloc = col_p1.number_input("Monthly Investment SIP (INR)", min_value=0.0, value=50000.0, step=5000.0)
+    expected_cagr = col_p2.slider("Expected Pre-Retirement CAGR (%)", 6.0, 18.0, 12.0, 0.5)
+    inflation_rate = col_p3.slider("Annual Inflation Rate (%)", 3.0, 10.0, 6.0, 0.5)
+
+    col_swr1, col_swr2 = st.columns(2)
+    swr_pct = col_swr1.slider("Safe Withdrawal Rate (SWR %)", 2.5, 5.0, 4.0, 0.1, help="4% = 25x rule, 3.3% = 30x conservative rule")
+    years_to_fire = target_fire_age - current_age
+
+    st.markdown("#### 🚩 Intermediate Capital Outflows / Goals")
+    st.caption("Add milestone deductions (e.g., buying real estate, children's higher education, car purchase) to evaluate timeline impact.")
+
+    with st.expander("➕ Configure Milestone Goals"):
+        col_g1, col_g2, col_g3 = st.columns(3)
+        goal_1_name = col_g1.text_input("Goal 1 Name", value="Real Estate Down Payment")
+        goal_1_years = col_g2.number_input("Occurs in (Years from now)", min_value=1, max_value=max(1, years_to_fire), value=min(4, max(1, years_to_fire)))
+        goal_1_amount = col_g3.number_input("Goal 1 Outflow (INR)", min_value=0.0, value=2500000.0, step=100000.0)
+
+        col_g4, col_g5, col_g6 = st.columns(3)
+        goal_2_name = col_g4.text_input("Goal 2 Name", value="Higher Education / Wedding")
+        goal_2_years = col_g5.number_input("Occurs in (Years from now)", min_value=1, max_value=max(1, years_to_fire), value=min(8, max(1, years_to_fire)))
+        goal_2_amount = col_g6.number_input("Goal 2 Outflow (INR)", min_value=0.0, value=1500000.0, step=100000.0)
+
+    current_annual_exp = monthly_living_exp * 12
+    future_annual_exp = current_annual_exp * ((1 + (inflation_rate / 100)) ** years_to_fire)
+    target_fire_corpus = future_annual_exp / (swr_pct / 100)
+
+    monthly_r = (expected_cagr / 100) / 12
+    total_months = years_to_fire * 12
+    running_corpus = total_current_inr
+    projection_records = []
+    goal_outflows_dict = {
+        goal_1_years * 12: (goal_1_name, goal_1_amount),
+        goal_2_years * 12: (goal_2_name, goal_2_amount)
+    }
+
+    for m in range(1, total_months + 1):
+        running_corpus = (running_corpus + monthly_sip_alloc) * (1 + monthly_r)
+        
+        if m in goal_outflows_dict and goal_outflows_dict[m][1] > 0:
+            running_corpus = max(0.0, running_corpus - goal_outflows_dict[m][1])
+
         if m % 12 == 0:
-            proj_rows.append({"Year": m // 12, "Projected Corpus (INR)": round(current_val, 2)})
+            year_num = m // 12
+            sim_age = current_age + year_num
+            inflated_annual_cost = current_annual_exp * ((1 + (inflation_rate / 100)) ** year_num)
+            required_corpus_at_yr = inflated_annual_cost / (swr_pct / 100)
+            
+            projection_records.append({
+                "Year": year_num,
+                "Age": sim_age,
+                "Projected Wealth (INR)": round(running_corpus, 2),
+                "Required FIRE Corpus (INR)": round(required_corpus_at_yr, 2)
+            })
 
-    df_p = pd.DataFrame(proj_rows)
-    fig_sim = px.line(df_p, x="Year", y="Projected Corpus (INR)", markers=True, title=f"Compounding Growth Over {yrs} Years")
-    st.plotly_chart(fig_sim, use_container_width=True)
-    if not df_p.empty:
-        st.success(f"Estimated Corpus at Year {yrs}: **₹{df_p.iloc[-1]['Projected Corpus (INR)']:,.2f} INR**")
+    sim_df = pd.DataFrame(projection_records)
+    final_corpus = sim_df.iloc[-1]["Projected Wealth (INR)"] if not sim_df.empty else 0.0
+    corpus_delta = final_corpus - target_fire_corpus
+
+    st.divider()
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Projected Corpus at Age " + str(target_fire_age), f"₹{final_corpus:,.2f}")
+    m2.metric("Target FIRE Number", f"₹{target_fire_corpus:,.2f}", help="Based on inflated future expenses and your chosen SWR")
+    m3.metric("Corpus Surplus / Shortfall", f"₹{corpus_delta:,.2f}", delta=f"{'Surplus (Ready to FIRE)' if corpus_delta >= 0 else 'Shortfall'}")
+
+    if not sim_df.empty:
+        fig_fire = go.Figure()
+        fig_fire.add_trace(go.Scatter(x=sim_df["Age"], y=sim_df["Projected Wealth (INR)"], mode='lines+markers', name='Projected Portfolio Value', line=dict(color='#38BDF8', width=3)))
+        fig_fire.add_trace(go.Scatter(x=sim_df["Age"], y=sim_df["Required FIRE Corpus (INR)"], mode='lines', name='Required FIRE Threshold', line=dict(color='#F43F5E', width=2, dash='dash')))
+        fig_fire.update_layout(title="Wealth Accumulation vs. Inflation-Adjusted FIRE Requirement", xaxis_title="Age", yaxis_title="INR (₹)", hovermode="x unified")
+        st.plotly_chart(fig_fire, use_container_width=True)
+
+    if corpus_delta >= 0:
+        st.success(f"🎉 **On Track:** At age {target_fire_age}, your projected portfolio (₹{final_corpus:,.2f}) covers your estimated annual living expense of ₹{future_annual_exp:,.2f} indefinitely at a {swr_pct}% withdrawal rate.")
+    else:
+        n = max(1, total_months)
+        r = monthly_r
+        future_val_existing = total_current_inr * ((1 + r) ** n)
+        remaining_gap = max(0.0, target_fire_corpus - future_val_existing + (goal_1_amount + goal_2_amount))
+        required_monthly_sip = remaining_gap * (r / (((1 + r) ** n) - 1)) if r > 0 else (remaining_gap / n)
+        
+        st.warning(f"⚠️ **Gap Identified:** You have a projected shortfall of ₹{abs(corpus_delta):,.2f}. To reach FIRE by age {target_fire_age} while funding your goals, consider increasing your monthly investment allocation to **₹{required_monthly_sip:,.2f} / month**.")
 
 # TAB 6: SHARE & QR CODE
 with tab_share:
     st.subheader("📲 Share VaultCFO")
     st.caption("Generate dynamic QR codes and direct links to share your application.")
     
-    app_url = st.text_input("Application Web Link", value="https://ai-cfo-dashboard-ec5qpbk75mqy36pkoxttmw.streamlit.app/")
+    app_url = st.text_input("Application Web Link", value="https://vaultcfoai.streamlit.app/")
     
     col_qr1, col_qr2 = st.columns([1, 2])
     with col_qr1:

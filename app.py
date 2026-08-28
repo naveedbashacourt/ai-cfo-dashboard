@@ -2,7 +2,7 @@ import sqlite3
 import hashlib
 import datetime
 import io
-import json
+import re
 import requests
 import pandas as pd
 import plotly.express as px
@@ -12,6 +12,7 @@ import yfinance as yf
 import google.generativeai as genai
 import qrcode
 from PIL import Image
+from pypdf import PdfReader
 
 # ----------------- LUXURY FINTECH THEME CONFIG -----------------
 st.set_page_config(
@@ -105,7 +106,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ----------------- DATABASE SCHEMA -----------------
-conn = sqlite3.connect("cfo_enterprise_v5.db", check_same_thread=False)
+conn = sqlite3.connect("cfo_enterprise_v6.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -147,20 +148,17 @@ CREATE TABLE IF NOT EXISTS liabilities (
 """)
 conn.commit()
 
-# ----------------- 1. LIVE AMFI MASTER DIRECTORY & LOOKUP -----------------
+# ----------------- LIVE AMFI MASTER DIRECTORY & LOOKUP -----------------
 @st.cache_data(ttl=86400)
 def load_amfi_scheme_directory():
-    """Fetches full AMFI mutual fund master list for instant search autocomplete."""
     try:
         url = "https://api.mfapi.in/mf"
         res = requests.get(url, timeout=5)
         if res.status_code == 200:
             data = res.json()
-            # Return dict mapping: 'Scheme Name' -> Scheme Code
             return {f"{item['schemeName']} [{item['schemeCode']}]": str(item['schemeCode']) for item in data}
     except Exception:
         pass
-    # Fallback popular funds if offline
     return {
         "Parag Parikh Flexi Cap Fund - Direct Plan - Growth [122639]": "122639",
         "HDFC Top 100 Fund - Direct Plan - Growth [118989]": "118989",
@@ -182,6 +180,47 @@ def fetch_mf_nav(scheme_code):
     except Exception:
         pass
     return None, None
+
+# ----------------- NATIVE CAS PDF PARSER -----------------
+def parse_cams_pdf(file_bytes, password=None):
+    try:
+        reader = PdfReader(io.BytesIO(file_bytes))
+        if reader.is_encrypted:
+            if not password:
+                return None, "PDF is password protected. Enter your PAN (CAPITAL) or DOB."
+            try:
+                reader.decrypt(password)
+            except Exception:
+                return None, "Incorrect PDF password."
+
+        extracted_text = ""
+        for page in reader.pages:
+            t = page.extract_text()
+            if t:
+                extracted_text += "\n" + t
+
+        holdings = []
+        lines = extracted_text.split("\n")
+        current_scheme = None
+
+        for line in lines:
+            line_clean = line.strip()
+            if any(k in line_clean.lower() for k in ["growth", "direct plan", "regular plan", "dividend", "idcw"]):
+                current_scheme = line_clean
+            
+            unit_match = re.search(r'(\d+\.\d{3})\s*$', line_clean)
+            if unit_match and current_scheme:
+                u = float(unit_match.group(1))
+                if u > 0:
+                    holdings.append({
+                        "Scheme Name": current_scheme,
+                        "Units": u
+                    })
+                    current_scheme = None
+
+        return holdings, None
+    except Exception as e:
+        return None, f"PDF Parsing Error: {str(e)}"
 
 # ----------------- LIVE MARKET DATA ENGINE -----------------
 @st.cache_data(ttl=300)
@@ -443,7 +482,7 @@ tab_ai, tab_port, tab_add, tab_cas, tab_debt, tab_sim, tab_share = st.tabs([
     "💬 AI CFO Copilot",
     "📊 Portfolio & Yields",
     "➕ Add Asset (AMFI Search)",
-    "📥 CAMS/CAS Auto-Sync",
+    "📥 CAMS/CAS Auto-Sync (PDF/CSV)",
     "💳 Debt & Liabilities",
     "🎯 Dynamic FIRE Simulator",
     "📲 Mobile App & QR"
@@ -704,47 +743,73 @@ with tab_add:
             st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-# TAB 4: CAMS / KFINTECH CAS STATEMENT AUTO-SYNC
+# TAB 4: CAMS / KFINTECH CAS STATEMENT AUTO-SYNC (PDF & CSV SUPPORT)
 with tab_cas:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("📥 CAMS / KFintech Consolidated Statement Auto-Sync")
-    st.caption("Auto-import mutual fund portfolios from standardized CAMS/CAS export files.")
+    st.caption("Upload your official CAS PDF statement directly. Password-protected files are supported.")
 
-    cas_file = st.file_uploader("Upload CAMS / CAS CSV Export", type=["csv"])
-    if cas_file:
-        try:
-            cas_df = pd.read_csv(cas_file)
-            st.write("Preview of Uploaded Holdings:")
-            st.dataframe(cas_df.head(5), use_container_width=True)
+    file_format = st.radio("Statement Format", ["PDF Statement (.pdf)", "CSV Export (.csv)"], horizontal=True)
 
-            if st.button("Auto-Import Holdings to Vault"):
-                # Detect columns flexibly
-                imported_count = 0
-                for _, row in cas_df.iterrows():
-                    scheme_name = str(row.get("Scheme Name", row.get("scheme", row.get("Fund Name", "Mutual Fund"))))
-                    units = float(row.get("Units", row.get("units", row.get("Quantity", 1.0))))
-                    buy_nav = float(row.get("Purchase NAV", row.get("nav", row.get("Buy Price", 100.0))))
+    if "PDF" in file_format:
+        uploaded_pdf = st.file_uploader("Upload CAMS/KFintech CAS PDF", type=["pdf"])
+        pdf_pw = st.text_input("PDF Password (usually PAN in CAPITAL or DOB DDMMYYYY)", type="password")
+        
+        if uploaded_pdf and st.button("Decrypt & Import CAS PDF", use_container_width=True):
+            with st.spinner("Decrypting and extracting folio holdings..."):
+                holdings, err = parse_cams_pdf(uploaded_pdf.read(), pdf_pw)
+                if err:
+                    st.error(err)
+                elif holdings:
+                    count = 0
+                    for h in holdings:
+                        s_name = h["Scheme Name"]
+                        units = h["Units"]
+                        
+                        mapped_code = ""
+                        for label, code in AMFI_DIRECTORY.items():
+                            if s_name.lower() in label.lower():
+                                mapped_code = code
+                                break
+                        
+                        cursor.execute("""
+                        INSERT INTO assets (user_id, name, category, sub_type, identifier, quantity, unit, buy_price, current_price, monthly_income, purchase_year, currency)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (uid, s_name, "Mutual Funds", "Mutual Fund Direct", mapped_code, units, "units", 100.0, 100.0, 0.0, current_year, "INR"))
+                        count += 1
                     
-                    # Try matching AMFI code
-                    mapped_code = ""
-                    for label, code in AMFI_DIRECTORY.items():
-                        if scheme_name.lower() in label.lower():
-                            mapped_code = code
-                            break
+                    conn.commit()
+                    st.success(f"Successfully imported {count} mutual fund folios from your CAS PDF!")
+                    st.rerun()
+                else:
+                    st.warning("Could not identify specific holdings in this PDF format. Ensure it is an official CAMS/KFintech summary.")
 
-                    cursor.execute("""
-                    INSERT INTO assets (user_id, name, category, sub_type, identifier, quantity, unit, buy_price, current_price, monthly_income, purchase_year, currency)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (uid, scheme_name, "Mutual Funds", "Mutual Fund Direct", mapped_code, units, "units", buy_nav, buy_nav, 0.0, current_year, "INR"))
-                    imported_count += 1
-
-                conn.commit()
-                st.success(f"Successfully imported {imported_count} mutual fund schemes.")
-                st.rerun()
-        except Exception as e:
-            st.error(f"Error parsing CAS file: {e}")
     else:
-        st.info("Upload your monthly Consolidated Account Statement (CAS) export to sync all folios in one click.")
+        cas_file = st.file_uploader("Upload CAS CSV", type=["csv"])
+        if cas_file and st.button("Import CAS CSV", use_container_width=True):
+            cas_df = pd.read_csv(cas_file)
+            imported_count = 0
+            for _, row in cas_df.iterrows():
+                scheme_name = str(row.get("Scheme Name", row.get("scheme", "Mutual Fund")))
+                units = float(row.get("Units", row.get("units", 1.0)))
+                buy_nav = float(row.get("Purchase NAV", row.get("nav", 100.0)))
+                
+                mapped_code = ""
+                for label, code in AMFI_DIRECTORY.items():
+                    if scheme_name.lower() in label.lower():
+                        mapped_code = code
+                        break
+
+                cursor.execute("""
+                INSERT INTO assets (user_id, name, category, sub_type, identifier, quantity, unit, buy_price, current_price, monthly_income, purchase_year, currency)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (uid, scheme_name, "Mutual Funds", "Mutual Fund Direct", mapped_code, units, "units", buy_nav, buy_nav, 0.0, current_year, "INR"))
+                imported_count += 1
+
+            conn.commit()
+            st.success(f"Successfully imported {imported_count} schemes.")
+            st.rerun()
+
     st.markdown('</div>', unsafe_allow_html=True)
 
 # TAB 5: DEBT & LIABILITIES
